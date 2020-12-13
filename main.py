@@ -1,22 +1,23 @@
 import os
+import cv2
 import time
 import random
 import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
-plt.style.use("ggplot")
-# %matplotlib inline
 
-from PIL import Image
-from tqdm import tqdm_notebook, tnrange
-from itertools import chain
-from skimage.io import imread, imshow, concatenate_images
-from skimage.transform import resize
-from skimage.morphology import label
-from sklearn.model_selection import train_test_split
+plt.style.use("ggplot")
 
 import tensorflow as tf
 
+import numpy as np
+from keras.backend import int_shape
+from keras.models import Model
+from keras.layers import Conv2D, Conv3D, MaxPooling2D, MaxPooling3D, UpSampling2D, UpSampling3D, Add, BatchNormalization, Input, Activation, Lambda, Concatenate
+
+
+
+import keras.backend as K
 from keras.models import Model, load_model
 from keras.layers import Input, BatchNormalization, Activation, Dense, Dropout
 from keras.layers.core import Lambda, RepeatVector, Reshape
@@ -26,34 +27,57 @@ from keras.layers.merge import concatenate, add
 from keras.callbacks import EarlyStopping, ModelCheckpoint, ReduceLROnPlateau
 from keras.optimizers import Adam
 from keras.preprocessing.image import ImageDataGenerator, array_to_img, img_to_array, load_img, save_img
+from keras.utils import plot_model
 
 im_width = 768
 im_height = 496
 channels = 1
 border = 5
 
-train_img = './finalDataset/train/images/'
-train_mask = './finalDataset/train/mask/'
+train_img = './Aug_Dataset/train/images/'
+train_mask = './Aug_Dataset/train/mask/'
 
-val_img = './finalDataset/val/images/'
-val_mask = './finalDataset/val/mask/'
+val_img = './Aug_Dataset/val/images/'
+val_mask = './Aug_Dataset/val/mask/'
+
+# val = './data/'
 
 train_imgs = os.listdir(train_img)
 train_masks = os.listdir(train_mask)
 
 val_imgs = os.listdir(val_img)
 val_masks = os.listdir(val_mask)
+data = os.listdir(val_img)
 # print(len(imgs))
 
 X_train = np.zeros((len(train_imgs), im_height, im_width, 1), dtype=np.float32)
 y_train = np.zeros((len(train_imgs), im_height, im_width, 1), dtype=np.float32)
 
+
 X_val = np.zeros((len(val_imgs), im_height, im_width, 1), dtype=np.float32)
 y_val = np.zeros((len(val_imgs), im_height, im_width, 1), dtype=np.float32)
 
-# tqdm is used to display the progress bar
-# for n, id_ in tqdm_notebook(enumerate(imgs), total=len(imgs)):
-    # Load images
+print(len(y_train), len(y_val))
+
+
+def iou(y_true, y_pred):
+
+    y_true = K.flatten(y_true)
+    y_pred = K.flatten(y_pred)
+    intersection = K.sum(y_true * y_pred)
+    union = K.sum(y_true) + K.sum(y_pred) - intersection
+    print(intersection, type(intersection))
+    print(union, type(union))
+    return 1. * intersection / union
+
+
+def dice_coef(y_true, y_pred, eps=1e-3):
+
+    y_true = K.flatten(y_true)
+    y_pred = K.flatten(y_pred)
+    intersection = K.sum(y_true * y_pred)
+    return (2. * intersection + eps) / (K.sum(y_true) + K.sum(y_pred) + eps)
+
 
 for i, img in enumerate(train_imgs):
 
@@ -74,7 +98,7 @@ for i, msk in enumerate(train_masks):
     y_train[i] = y/255
 
 for i, img in enumerate(val_imgs):
-
+    # print(val+img)
     img = load_img(val_img+img, grayscale=True)
     x_img = img_to_array(img)
     # x_img = resize(x_img, (128, 128, 1), mode = 'constant', preserve_range = True)
@@ -88,24 +112,6 @@ for i, msk in enumerate(val_masks):
     mask = load_img(val_mask + msk, color_mode='grayscale')
     y = img_to_array(mask)
     y_val[i] = y/255
-
-
-# Visualize any random image along with the mask
-ix = random.randint(0, len(X_train))
-has_mask = y_train[ix].max() > 0 # salt indicator
-has_mask = has_mask*255
-fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(20, 15))
-
-ax1.imshow(X_train[ix, ..., 0], cmap='seismic', interpolation='bilinear')
-if has_mask: # if salt
-    # draw a boundary(contour) in the original image separating salt and non-salt areas
-    ax1.contour(y_train[ix].squeeze(), colors = 'k', linewidths = 5, levels = [0.5])
-ax1.set_title('Seismic')
-
-ax2.imshow(y_train[ix].squeeze(), cmap = 'gray', interpolation = 'bilinear')
-ax2.set_title('Salt')
-# print('reached here!')
-# time.sleep(10)
 
 
 def conv2d_block(input_tensor, n_filters, kernel_size=3, batchnorm=True):
@@ -122,6 +128,7 @@ def conv2d_block(input_tensor, n_filters, kernel_size=3, batchnorm=True):
         x = BatchNormalization()(x)
     x = Activation('relu')(x)
     return x
+
 
 
 def get_unet(input_img, n_filters=16, dropout=0.1, batchnorm=True):
@@ -174,63 +181,59 @@ def get_unet(input_img, n_filters=16, dropout=0.1, batchnorm=True):
 
 input_img = Input((im_height, im_width, 1), name='img')
 model = get_unet(input_img, n_filters=16, dropout=0.05, batchnorm=True)
-model.load_weights('./model1.h5')
-model.compile(optimizer=Adam(), loss="binary_crossentropy", metrics=["accuracy"])
+# model.load_weights('./experiments/model1_50.h5')
+model.compile(optimizer=Adam(lr=0.0002), loss="binary_crossentropy", metrics=["accuracy", iou, dice_coef])
 model.summary()
 
-callbacks = [
-    EarlyStopping(patience=10, verbose=1),
-    ReduceLROnPlateau(factor=0.1, patience=5, min_lr=0.00001, verbose=1),
-    ModelCheckpoint('model1_40.h5', verbose=1, save_best_only=True, save_weights_only=True)
-]
-#
-#
-results = model.fit(X_train, y_train, batch_size=4, epochs=20, callbacks=callbacks,
-                    validation_data=(X_val, y_val))
+results = model.fit(X_train, y_train, batch_size=4, epochs=100, validation_data=(X_val, y_val))
 
 preds_val = model.predict(X_val, batch_size=4)
+preds_val = (preds_val > 0.5).astype(np.uint8)
 preds_val_t = preds_val*255
 
 
 id = random.randint(0, len(X_val))
-img = array_to_img(X_val[id])
-mask = array_to_img(preds_val_t[id])
-img.show()
-mask.show()
+
+print(len(X_val), len(preds_val_t))
+for i in range(len(X_val)):
+    print('./overlays/overlay' + str(i) + '.png')
+    img = array_to_img(X_val[i])
+    main = np.array(img)
+    mask = array_to_img(preds_val_t[i])
+    # cv2.imwrite('./overlays/mask' + str(i) + '.png')
+    seg = np.array(mask)
+    # print(type(main), type(seg))
+    main = cv2.cvtColor(main, cv2.COLOR_GRAY2BGR)
+    # main.show()
+    # seg.show()
+
+    print(seg.shape)
+    # sys.exit(0)
+    contours, _ = cv2.findContours(seg, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
+    RGBforLabel = {1: (0, 0, 255), 2: (0, 255, 255)}
+
+    for i,c in enumerate(contours):
+        # Find mean colour inside this contour by doing a masked mean
+        mask = np.zeros(seg.shape, np.uint8)
+        cv2.drawContours(mask,[c],-1,255, -1)
+        # DEBUG: cv2.imwrite(f"mask-{i}.png",mask)
+        mean, _, _, _ = cv2.mean(seg, mask=mask)
+        # DEBUG: print(f"i: {i}, mean: {mean}")
+
+        # Get appropriate colour for this label
+        label = 2 if mean > 1.0 else 1
+        colour = RGBforLabel.get(label)
+        # DEBUG: print(f"Colour: {colour}")
+
+        # Outline contour in that colour on main image, line thickness=1
+        cv2.drawContours(main, [c], -1, colour, 1)
+
+    cv2.imwrite('./overlays/overlay' + str(i) + '.png', main)
+    cv2.imwrite('./overlays/mask'+str(i)+'.png', main)
 
 for i in range(len(preds_val_t)):
     img = array_to_img(preds_val_t[i])
-    save_img('./predictions/'+str(i)+'.png', preds_val[i], scale=True)
+    save_img('./graders/prediction/'+data[i], preds_val[i], scale=True)
 
-model.save_weights('./model1_40.h5')
+model.save_weights('./experiments/model2_100.h5')
 
-
-def plot_sample(X, y, preds, binary_preds, ix=None):
-    """Function to plot the results"""
-    if ix is None:
-        ix = random.randint(0, len(X))
-
-    has_mask = y[ix].max() > 0
-
-    fig, ax = plt.subplots(1, 4, figsize=(20, 10))
-    ax[0].imshow(X[ix, ..., 0], cmap='seismic')
-    if has_mask:
-        ax[0].contour(y[ix].squeeze(), colors='k', levels=[0.5])
-    ax[0].set_title('Seismic')
-
-    ax[1].imshow(y[ix].squeeze())
-    ax[1].set_title('Salt')
-
-    ax[2].imshow(preds[ix].squeeze(), vmin=0, vmax=1)
-    if has_mask:
-        ax[2].contour(y[ix].squeeze(), colors='k', levels=[0.5])
-    ax[2].set_title('Salt Predicted')
-
-    ax[3].imshow(binary_preds[ix].squeeze(), vmin=0, vmax=1)
-    if has_mask:
-        ax[3].contour(y[ix].squeeze(), colors='k', levels=[0.5])
-    ax[3].set_title('Salt Predicted binary');
-
-
-
-plot_sample(X_val, y_val, preds_val, preds_val_t, ix=14)
